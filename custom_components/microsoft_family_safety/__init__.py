@@ -37,6 +37,7 @@ from .const import (
 from .coordinator import FamilySafetyDataUpdateCoordinator
 from ._httpx_web_adapter import apply_httpx_web_transport_patch
 from ._httpx_web_tuning import apply_httpx_web_tuning_patch
+from ._roster_patch import apply_roster_patches
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -159,6 +160,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Microsoft Family Safety from a config entry."""
     apply_httpx_web_transport_patch(hass)
     apply_httpx_web_tuning_patch()
+    # Must run before the coordinator calls FamilySafety.create(): it makes the
+    # roster *list* request survive Microsoft's "cannot resolve node" 404 the
+    # same way _pyfamilysafety_compat already makes the per-member requests
+    # survive it. Without this, one unresolvable device in the family (a reset
+    # machine, or a school/work Entra ID device that is invisible in the Family
+    # Safety UI) aborts setup permanently and no entity is ever created.
+    apply_roster_patches()
     coordinator = FamilySafetyDataUpdateCoordinator(hass, entry)
 
     # Load persisted screentime policies (for lock/unlock survival across restarts)
