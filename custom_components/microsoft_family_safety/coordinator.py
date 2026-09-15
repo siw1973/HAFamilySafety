@@ -1234,6 +1234,49 @@ class FamilySafetyDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "account_id": account_id,
         }
 
+    def _get_known_account_ids(self) -> list[str]:
+        """Get family member IDs from entity registry when roster is unavailable.
+
+        Used in degraded mode when the mobile API roster fails (e.g. a stale
+        Entra ID / school device still enrolled in the family roster) and
+        FamilySafety.create() returns with accounts=[].  We fall back to the
+        entity registry so previously-known members still get web API data.
+        """
+        from homeassistant.helpers import entity_registry as er
+        registry = er.async_get(self.hass)
+        entries = er.async_entries_for_config_entry(registry, self.entry.entry_id)
+        prefix = f"{self.entry.entry_id}_"
+        account_ids: list[str] = []
+        for entry in entries:
+            uid = entry.unique_id or ""
+            if uid.startswith(prefix) and uid.endswith("_account_lock"):
+                inner = uid[len(prefix):-len("_account_lock")]
+                if inner.isdigit():
+                    account_ids.append(inner)
+        return account_ids
+
+    @staticmethod
+    def _empty_account_stub(account_id: str) -> dict:
+        """Minimal account dict for degraded (roster-unavailable) mode."""
+        return {
+            "user_id": account_id,
+            "first_name": None,
+            "surname": None,
+            "profile_picture": None,
+            "today_screentime_usage": None,
+            "raw_today_screentime_usage": None,
+            "raw_today_screentime_ms": None,
+            "screen_time_polled_at": None,
+            "screen_time_date": None,
+            "average_screentime_usage": None,
+            "account_balance": None,
+            "account_currency": None,
+            "blocked_platforms": [],
+            "roster_errors": {},
+            "devices": [],
+            "applications": [],
+        }
+
     async def _async_update_data(self) -> dict[str, Any]:
         if self.api is None:
             await self._async_setup_api()
@@ -1290,6 +1333,37 @@ class FamilySafetyDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     if web_data.get(key) is None and previous.get(key) is not None:
                         web_data[key] = previous.get(key)
                 accounts_data[account_id].update(web_data)
+            if not accounts_data:
+                # Degraded mode: mobile API roster returned no accounts.
+                # This happens when a decommissioned or school/work (Entra ID)
+                # device is still listed in the family roster and Microsoft
+                # returns a 404 for the roster endpoint.  pyfamilysafety.create()
+                # catches this and sets accounts=[] so the integration can still
+                # start.  Recover known family members from the entity registry
+                # and fetch schedule/policy data via the web API only.
+                _LOGGER.warning(
+                    "Family Safety: mobile API returned no accounts — "
+                    "running in degraded mode (schedules and policy via web API only). "
+                    "This is usually caused by a stale Entra ID (school/work) device "
+                    "still enrolled in the family roster."
+                )
+                for account_id in self._get_known_account_ids():
+                    previous = (
+                        (self.data or {}).get("accounts", {}).get(account_id) or {}
+                    )
+                    accounts_data[account_id] = (
+                        dict(previous) if previous
+                        else self._empty_account_stub(account_id)
+                    )
+                    web_data = await self._fetch_web_api_data(account_id)
+                    # Carry forward the last known value for each policy key so
+                    # entities don't flip to unknown on a transient web failure.
+                    for key in ("web_browsing", "content_settings", "screentime_policy"):
+                        if web_data.get(key) is None and previous.get(key) is not None:
+                            web_data[key] = previous.get(key)
+                    accounts_data[account_id].update(web_data)
+                # Carry forward any device data from the previous successful poll.
+                devices_data.update((self.data or {}).get("devices", {}))
             await self._async_track_family_context()
             await self._async_sync_roster_notification(accounts_data)
             self._accounts = new_accounts
