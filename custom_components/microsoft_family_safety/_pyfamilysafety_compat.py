@@ -50,6 +50,14 @@ that surface on Home Assistant, especially on Python 3.14:
    child with empty data for the failing endpoint and records the failure in
    ``Account.roster_errors`` for the coordinator to surface.
 
+9. This module's own ``send_request`` patch used to capture the original at
+   module import time. Because the replacement calls that captured binding
+   directly, any wrapper installed on ``FamilySafetyAPI.send_request`` after
+   this module was imported but before ``apply_patches()`` ran was silently
+   removed from the call chain rather than layered under it. The capture now
+   happens inside ``apply_patches()``, at assignment time, so layered patches
+   compose correctly.
+
 This module patches those paths while keeping token values out of the log.
 """
 from __future__ import annotations
@@ -308,7 +316,12 @@ async def _patched_perform_refresh(self: Authenticator) -> None:
         )
 
 
-_original_send_request = FamilySafetyAPI.send_request
+#: The callable ``_patched_send_request`` delegates to. Bound inside
+#: ``apply_patches()`` at assignment time, NOT here at import time: binding it
+#: at import would capture the pristine library method and silently drop any
+#: wrapper installed on ``FamilySafetyAPI.send_request`` in between (the
+#: scoped roster fallback in ``_roster_patch`` is exactly such a wrapper).
+_original_send_request: Any = None
 
 
 async def _patched_send_request(
@@ -717,6 +730,7 @@ def _patch_account_roster_tolerance() -> bool:
 
 def apply_patches(hass: HomeAssistant) -> None:
     """Apply the pyfamilysafety compatibility patches (idempotent)."""
+    global _original_send_request
     set_shared_session(async_get_clientsession(hass))
     applied: list[str] = []
 
@@ -731,6 +745,9 @@ def apply_patches(hass: HomeAssistant) -> None:
         applied.append("validated mobile token refresh")
 
     if not getattr(FamilySafetyAPI.send_request, _API_PATCH_MARKER, False):
+        # Capture at assignment time so any wrapper already installed on
+        # send_request stays in the call chain underneath this one.
+        _original_send_request = FamilySafetyAPI.send_request
         setattr(_patched_send_request, _API_PATCH_MARKER, True)
         FamilySafetyAPI.send_request = _patched_send_request
         applied.append("single Unauthorized refresh retry")
