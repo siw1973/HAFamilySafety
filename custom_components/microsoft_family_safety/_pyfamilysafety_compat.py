@@ -50,6 +50,12 @@ that surface on Home Assistant, especially on Python 3.14:
    child with empty data for the failing endpoint and records the failure in
    ``Account.roster_errors`` for the coordinator to surface.
 
+   The same member can also be refused with HTTP 403
+   ``Service.UnknownUserType`` ("The role of the caller or target is
+   unknown"), observed on ``/v1/Spending/<puid>``. That is the same
+   condition wearing a different status code, so the per-member tolerance
+   recognises both — see ``is_unresolvable_member_error``.
+
 9. This module's own ``send_request`` patch used to capture the original at
    module import time. Because the replacement calls that captured binding
    directly, any wrapper installed on ``FamilySafetyAPI.send_request`` after
@@ -110,6 +116,16 @@ _STALE_ROSTER_MARKERS = (
     "unable to find the node",
 )
 
+#: Microsoft's other "cannot resolve this member" answer: HTTP 403
+#: ``Service.UnknownUserType`` — "The role of the caller or target is
+#: unknown." Observed on ``/v1/Spending/<puid>`` for a member whose other
+#: endpoints already return the roster 404 above. Kept separate from
+#: ``_STALE_ROSTER_MARKERS`` so the roster-level fallback does not widen.
+_UNKNOWN_USER_TYPE_MARKERS = (
+    "service.unknownusertype",
+    "role of the caller or target is unknown",
+)
+
 #: (user_id, endpoint) pairs already reported at WARNING level, so a roster
 #: error that persists across polls is logged once and then only at DEBUG.
 _ROSTER_WARNED: set[tuple[str, str]] = set()
@@ -119,6 +135,19 @@ def is_stale_roster_error(text: str) -> bool:
     """Return True for Microsoft's "device/node not found in roster" 404."""
     lowered = (text or "").lower()
     return any(marker in lowered for marker in _STALE_ROSTER_MARKERS)
+
+
+def is_unresolvable_member_error(text: str) -> bool:
+    """Return True for either answer meaning "cannot resolve this member".
+
+    Used ONLY for per-member endpoint tolerance. The roster-level fallback
+    deliberately keeps using :func:`is_stale_roster_error` so that widening
+    this does not widen what the roster fallback intercepts.
+    """
+    lowered = (text or "").lower()
+    return is_stale_roster_error(lowered) or any(
+        marker in lowered for marker in _UNKNOWN_USER_TYPE_MARKERS
+    )
 
 
 def _empty_screentime_report() -> dict[str, Any]:
@@ -671,9 +700,10 @@ def _patch_account_roster_tolerance() -> bool:
     In 1.1.2 the first ``HttpException`` aborts the whole roster, so one
     ``Family.UnableToFindTargetResource`` 404 blocks every child (issue #42).
     The replacement runs each request on its own, swallows only that specific
-    404, leaves the member with empty data for the failing endpoint and lists
-    the failures in ``account.roster_errors`` ({endpoint: message}).  Any other
-    error still propagates unchanged.
+    404 and the equivalent ``Service.UnknownUserType`` 403, leaves the member
+    with empty data for the failing endpoint and lists the failures in
+    ``account.roster_errors`` ({endpoint: message}).  Any other error still
+    propagates unchanged.
     """
     current = Account.update
     if getattr(current, _ROSTER_TOLERANCE_PATCH_MARKER, False):
@@ -684,7 +714,7 @@ def _patch_account_roster_tolerance() -> bool:
             await coro
         except HttpException as err:
             text = str(err)
-            if not is_stale_roster_error(text):
+            if not is_unresolvable_member_error(text):
                 raise
             account.roster_errors[endpoint] = text[:200]
             key = (str(account.user_id), endpoint)
