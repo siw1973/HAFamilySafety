@@ -37,6 +37,7 @@ from .const import (
 from .coordinator import FamilySafetyDataUpdateCoordinator
 from ._httpx_web_adapter import apply_httpx_web_transport_patch
 from ._httpx_web_tuning import apply_httpx_web_tuning_patch
+from ._repairs import apply_repairs_patch
 from ._roster_patch import apply_roster_patches, clear_roster_provider
 
 _LOGGER = logging.getLogger(__name__)
@@ -163,6 +164,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Scoped get_accounts roster fallback. Must be installed before the
     # coordinator calls FamilySafety.create().
     apply_roster_patches(hass, entry)
+    # Surface missing device data in Repairs instead of a notification.
+    apply_repairs_patch()
     coordinator = FamilySafetyDataUpdateCoordinator(hass, entry)
 
     # Load persisted screentime policies (for lock/unlock survival across restarts)
