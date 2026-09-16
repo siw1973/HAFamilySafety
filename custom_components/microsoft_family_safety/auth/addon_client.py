@@ -332,6 +332,80 @@ class AddonCookieClient:
             _LOGGER.error("Unexpected error fetching screentime: %s", err)
             return None
 
+    async def fetch_roster(self) -> dict | None:
+        """Fetch the family roster via the app's browser-based endpoint.
+
+        Used as a fallback when Microsoft's mobile aggregator roster endpoint
+        returns a Family.UnableToFindTargetResource / RosterError 404, which
+        happens when the family contains a device enrolled in a work/school
+        (Entra ID / MDM) tenant that Microsoft can no longer resolve.
+
+        Returns the roster ``data`` dict, or None on any failure so the caller
+        can re-raise the original 404 rather than mask it.
+
+        The payload is never logged: it carries per-member ``jsonWebToken``
+        relationship tokens, children's ages, and a ``primaryId`` that is
+        typically an email address. Only the member count is logged.
+        """
+        url = await self._get_addon_url()
+        api_url = f"{url.rstrip('/')}/api/roster"
+        headers = await self._auth_headers()
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    api_url,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=120),
+                ) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        result = data.get("data")
+                        if not isinstance(result, dict):
+                            _LOGGER.warning(
+                                "App roster API returned an unexpected payload type"
+                            )
+                            return None
+                        _LOGGER.info(
+                            "Family roster fetched via app browser (%d members)",
+                            len(result.get("members") or []),
+                        )
+                        return result
+                    text = await response.text()
+                    detail = text
+                    error_code = None
+                    try:
+                        err_data = json.loads(text)
+                        if isinstance(err_data, dict):
+                            err_detail = err_data.get("detail", {})
+                            if isinstance(err_detail, dict):
+                                ms_status = err_detail.get("microsoft_status", "?")
+                                error_code = err_detail.get("error", "?")
+                                message = err_detail.get("message", "")[:300]
+                                detail = (
+                                    f"code={error_code} microsoft_status={ms_status} "
+                                    f"message={message}"
+                                )
+                    except Exception:
+                        pass
+                    if response.status == 503 and error_code == "BROWSER_BUSY":
+                        _LOGGER.info(
+                            "App browser busy (auth in progress), roster fallback "
+                            "will be retried on the next cycle"
+                        )
+                    else:
+                        _LOGGER.warning(
+                            "App roster API returned %s: %s",
+                            response.status,
+                            detail[:500],
+                        )
+                    return None
+        except aiohttp.ClientError as err:
+            _LOGGER.warning("Failed to fetch roster from app: %s", err)
+            return None
+        except Exception as err:
+            _LOGGER.error("Unexpected error fetching roster: %s", err)
+            return None
+
     async def set_screentime_allowance(
         self, child_id: str, day_of_week: int, hours: int, minutes: int
     ) -> bool:
