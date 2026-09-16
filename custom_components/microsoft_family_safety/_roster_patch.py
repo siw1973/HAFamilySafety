@@ -34,6 +34,10 @@ works for account-level calls). Its member shape differs from the mobile
 one, so the payload is translated rather than substituted --
 ``Account.from_dict`` is left untouched.
 
+This module also soft-fails ``FamilySafety._get_pending_requests``, which
+is called from ``create()`` and again from ``update()`` on every poll and
+fails the same way for the same families.
+
 Privacy
 -------
 The roster payload contains per-member ``jsonWebToken`` relationship
@@ -63,6 +67,9 @@ _STALE_ROSTER_MARKERS = (
 
 #: Async callable returning the raw web-roster ``data`` dict, or None.
 RosterProvider = Callable[[], Awaitable[dict | None]]
+
+#: Set on the replacement so a second install is a no-op.
+_PENDING_PATCH_MARKER = "_hafs_pending_requests_soft_fail"
 
 _roster_provider: RosterProvider | None = None
 _patch_applied = False
@@ -167,6 +174,45 @@ async def _fallback_roster_response() -> dict[str, Any] | None:
     }
 
 
+def _install_pending_requests_soft_fail() -> None:
+    """Stop unresolvable pending requests aborting setup and every poll.
+
+    ``FamilySafety._get_pending_requests`` is called from ``create()`` and
+    again from ``update()`` on every poll, and ``update()`` only swallows
+    ``AggregatorException``. When Microsoft cannot resolve the family on the
+    mobile aggregator, ``/v1/PendingRequests`` fails the same way the roster
+    does, which kills setup and then every refresh.
+
+    Pending requests are an optional dataset: none is a valid answer. Only
+    the specific "cannot resolve" errors are softened; anything else raises.
+    """
+    from pyfamilysafety import FamilySafety
+    from ._pyfamilysafety_compat import is_unresolvable_member_error
+
+    original = FamilySafety._get_pending_requests
+    if getattr(original, _PENDING_PATCH_MARKER, False):
+        return
+
+    async def _patched_get_pending_requests(self: Any):
+        try:
+            return await original(self)
+        except HttpException as err:
+            if not is_unresolvable_member_error(str(err)):
+                raise
+            _LOGGER.warning(
+                "Microsoft could not resolve pending screen-time requests for "
+                "this family (%s); continuing with none. Account data is "
+                "unaffected.",
+                str(err)[:120],
+            )
+            self.pending_requests = []
+            return []
+
+    setattr(_patched_get_pending_requests, _PENDING_PATCH_MARKER, True)
+    FamilySafety._get_pending_requests = _patched_get_pending_requests
+    _LOGGER.debug("Pending-requests soft fail installed")
+
+
 def install_roster_fallback() -> None:
     """Install the scoped get_accounts patch only. Idempotent.
 
@@ -210,6 +256,7 @@ def install_roster_fallback() -> None:
 
     _send_request_with_roster_fallback.__wrapped__ = original_send_request
     FamilySafetyAPI.send_request = _send_request_with_roster_fallback
+    _install_pending_requests_soft_fail()
     _patch_applied = True
     _LOGGER.debug("Scoped get_accounts roster fallback installed")
 
