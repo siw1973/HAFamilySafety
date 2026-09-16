@@ -471,6 +471,27 @@ async def get_screentime(childId: str, _: None = Depends(_verify_api_key)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/roster")
+async def get_roster(_: None = Depends(_verify_api_key)):
+    """Fetch the family roster through an authenticated browser session.
+
+    Read-only. Mirrors /api/screentime but targets the roster endpoint,
+    which the mobile aggregator API cannot resolve when the family contains
+    a device enrolled in a work/school (Entra ID) tenant.
+    """
+    manager = _require_browser_manager()
+    try:
+        result = await manager.browser_fetch(
+            "https://account.microsoft.com/family/api/roster"
+        )
+        return {"status": "success", "data": _unwrap_browser_result(result, "FETCH_ERROR")}
+    except HTTPException:
+        raise
+    except Exception as e:
+        _LOGGER.error(f"Roster fetch failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/screentime/set-allowance")
 async def set_screentime_allowance(request: Request, _: None = Depends(_verify_api_key)):
     """Set daily screen time allowance via browser session.
