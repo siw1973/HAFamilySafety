@@ -1,4 +1,10 @@
 {
+  "issues": {
+    "device_data_unavailable": {
+      "title": "Device data unavailable",
+      "description": "Microsoft Family Safety returned no device data for {members}.\n\nThis usually happens when a work or school (Entra ID) account has been added to one of that person's devices alongside their personal Microsoft account.\n\nA sign of this: the device appears in Family Safety under a generic name such as \"Windows Device\" instead of its real name.\n\nRemoving the work or school account from the device has been observed to fix this — the device's proper name returned in Family Safety.\n\nIf the work or school account is needed and cannot be removed, in Home Assistant screen-time schedules and other account settings continue to work normally; only device data and device-level usage are affected."
+    }
+  },
   "config": {
     "step": {
       "user": {
