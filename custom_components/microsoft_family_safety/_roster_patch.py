@@ -114,6 +114,14 @@ def translate_web_roster(payload: dict[str, Any]) -> dict[str, Any]:
     ``puid`` is the identifier the mobile API uses: it is the value already
     present in this integration's existing entity ``unique_id`` values,
     whereas ``primaryId`` and ``cid`` are not.
+
+    The id is emitted as an **int** when it is all digits, because that is
+    what the mobile roster returns and therefore what existing installs have
+    in their device registry. This matters: account ``DeviceInfo`` builds
+    ``identifiers={(DOMAIN, account_id)}`` from a bare variable, so an int id
+    and a str id are two different devices, while every entity ``unique_id``
+    is an f-string and is unaffected. Emitting a str here silently created a
+    second, empty device per family member and re-homed their entities to it.
     """
     members: list[dict[str, Any]] = []
     for member in payload.get("members") or []:
@@ -122,9 +130,14 @@ def translate_web_roster(payload: dict[str, Any]) -> dict[str, Any]:
         puid = member.get("puid")
         if puid is None:
             continue
+        # Preserve the mobile roster's type -- see the note in the docstring.
+        if isinstance(puid, str) and puid.isdigit():
+            account_id: Any = int(puid)
+        else:
+            account_id = puid
         members.append(
             {
-                "id": str(puid),
+                "id": account_id,
                 "role": member.get("role"),
                 "profilePicUrl": None,
                 "isDigitalSafetyEnabled": member.get("isDigitalSafetyEnabled"),
